@@ -25,5 +25,31 @@ class ProjectSpec(model.BaseModel):
 class Project(model.BaseModel):
   spec: ProjectSpec
   sources: List[SourceDirectory]
+  
+  def modules(self):
+    for source in self.sources:
+      for module in source.modules.values():
+        yield module
 
+
+  def resolve_references(self):
+    """
+    Look at all the references in all the modules, and check if they are in this project.
+    If they are, then set the target of the reference to where it points.
+    Otherwise, append them to a list of unresolved references
+    """
+    targets = {}
+    for module in self.modules():
+      for name, node, scope in module.all_nodes():
+        if not name:
+          continue
+        targets[name] = node
+    for module in self.modules():
+      for resolvable in module.all_references(scope=None):
+        resolvable: model.ResolvableReference = resolvable
+        key = resolvable.reference.fully_qualified_name
+        if key in targets:
+          resolvable.reference.target = targets[key]
+        else:
+          print("Unresolved reference", key)
 

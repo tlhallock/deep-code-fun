@@ -18,15 +18,17 @@ A = TypeVar("A")
 class ParsingStack(ABC, Generic[A, T]):
   elements: List[T]
   
-  def __init__(self):
-    self.elements = []
+  def __init__(self, elements: List[T] = []):
+    self.elements = elements
   
   @abstractmethod
   def create(self, arg: A) -> T:
     pass
   
-  def push(self, arg: A):
-    self.elements.append(self.create(arg=arg))
+  def push(self, arg: A) -> T:
+    ret = self.create(arg=arg)
+    self.elements.append(ret)
+    return ret
   
   def peek(self) -> T:
     return self.elements[-1]
@@ -48,7 +50,7 @@ class CodeStack(ParsingStack[model.AstNode, model.AstNode]):
     return arg
 
 
-class ScopeStack(ParsingStack[model.Scope, str]):
+class ScopeStack(ParsingStack[str, model.Scope]):
   def create(self, arg: str) -> model.Scope:
     return model.Scope(
       name=arg,
@@ -57,33 +59,38 @@ class ScopeStack(ParsingStack[model.Scope, str]):
     )
 
 
-class PathStack(ParsingStack[str, str]):
-  def create(self, state: "ParsingState", arg: str) -> model.Scope:
+class PathStack(ParsingStack[Optional[str], Optional[str]]):
+  def create(self, arg: Optional[str]) -> Optional[str]:
     return arg
 
 
-class ParsingState(model.BaseModel):
-  # root_path: str
+class ParsingState:
   codes: CodeStack
   scopes: ScopeStack
-  path: PathStack
+  paths: PathStack
   
-  def fully_qualify(self, local_name: List[str]) -> str:
-    return ".".join(self.path.elements + local_name)
+  def __init__(self, codes: CodeStack, scopes: ScopeStack, paths: PathStack):
+    self.codes = codes
+    self.scopes = scopes
+    self.paths = paths
+  
+  def fully_qualify(self, local_name: List[Optional[str]]) -> str:
+    return ".".join(s if s is not None else "none" for s in self.paths.elements + local_name)
   
   @classmethod
   def create(cls, base_path) -> "ParsingState":
     return cls(
       # root_path=root_path,
-      code_stack=[],
-      scope_stack=[model.Scope(name="module scope", parent=None, aliases={})],
-      path_stack=[base_path],
+      codes=CodeStack(),
+      scopes=ScopeStack(elements=[model.Scope(name="module scope", parent=None, aliases={})]),
+      paths=PathStack(elements=[base_path]),
     )
 
 
-A = TypeVar("A", bound=ast.AST)
-B = TypeVar("B", bound=ast.AST)
-class AstParser(ABC, Generic[A, B]):
+O = TypeVar("O", bound=ast.AST)
+N = TypeVar("N", bound=model.AstNode)
+G = TypeVar("G")
+class AstParser(ABC, Generic[O, G, N]):
   state: ParsingState
   node_type: model.AstNodeType
   
@@ -92,7 +99,7 @@ class AstParser(ABC, Generic[A, B]):
     self.node_type = node_type
   
   @abstractmethod
-  def begin(self, node: A, arg: Optional[B]) -> T:
+  def begin(self, node: O, arg: G):
     pass
   
   @abstractmethod
@@ -100,98 +107,126 @@ class AstParser(ABC, Generic[A, B]):
     pass
   
   @contextmanager
-  def with_(self, node: A, arg: Optional[B]):
+  def with_(self, node: O, arg: G):
     self.begin(node=node, arg=arg)
     try:
       yield
     finally:
       self.end()
   
-  def parse_base(self, node: A, arg: Optional[str]) -> Dict[str, Any]:
+  def parse_base(self, node: O, name: Optional[str]) -> Dict[str, Any]:
     return dict(
-        scope=self.state.scopes.peek(),
-        fully_qualified_name=self.state.fully_qualify([arg]),
         ast_type=node.__class__.__name__,
         children=[],
         references=[],
         node_type=self.node_type,
     )
   
+
+class ModuleParser(AstParser[ast.Module, str, model.Module]):
+  def __init__(self, state: ParsingState):
+    super().__init__(state=state, node_type=model.AstNodeType.Module)
   
-class ClassParser(AstParser[ast.ClassDef, str]):
+  def begin(self, node: ast.Module, arg: str):
+    scope = self.state.scopes.push("module scope")
+    self.state.codes.push(
+      model.Module(
+        **self.parse_base(node=node, name="module"),
+        scope=scope,
+        relative_path=arg,
+        fully_qualified_name=arg,
+      ),
+    )
+    self.state.paths.push(arg)
+    
+  def end(self):
+    self.state.scopes.pop()
+    self.state.codes.pop()
+    self.state.paths.pop()
+
+
+class ClassParser(AstParser[ast.ClassDef, str, model.Class]):
   def __init__(self, state: ParsingState):
     super().__init__(state=state, node_type=model.AstNodeType.Class)
     
   def begin(self, node: ast.ClassDef, arg: str):
+    scope = self.state.scopes.push(f"class {node.name}")
     self.state.codes.push(
-      **model.Class(self.parse_base(node=node, name=node.name))
+      model.Class(
+        **self.parse_base(node=node, name=node.name),
+        name=arg,
+        scope=scope,
+        fully_qualified_name=self.state.fully_qualify([node.name]),
+      ),
     )
-    self.state.scopes.push(arg)
-    self.state.path.push(node.name)
+    self.state.paths.push(node.name)
     
   def end(self):
-    self.state.path.pop()
+    self.state.paths.pop()
     self.state.scopes.pop()
     self.state.codes.pop()
 
 
-class FunctionParser(AstParser[ast.AST, Tuple[str, model.FunctionType]]):
+class FunctionParser(AstParser[ast.AST, Tuple[str, model.FunctionType], model.Function]):
   def __init__(self, state: ParsingState):
     super().__init__(state=state, node_type=model.AstNodeType.Function)
     
   def begin(self, node: ast.AST, arg: Tuple[str, model.FunctionType]):
     name, function_type = arg[0], arg[1]
+    scope = self.state.scopes.push(f"function {name}")
     self.state.codes.push(
       model.Function(
+        **self.parse_base(node=node, name=name),
+        name=name,
         function_type=function_type,
-        **self.parse_base(node=node, name=name)
+        scope=scope,
+        fully_qualified_name=self.state.fully_qualify([name]),
       )
     )
-    self.state.scopes.push(name)
-    self.state.path.push(name)
+    self.state.paths.push(name)
     
   def end(self):
-    self.state.path.pop()
+    self.state.paths.pop()
     self.state.scopes.pop()
     self.state.codes.pop()
 
 
-class StatementParser(AstParser[ast.stmt, int]):
+class StatementParser(AstParser[ast.stmt, int, model.Statement]):
   def __init__(self, state: ParsingState):
     super().__init__(state=state, node_type=model.AstNodeType.Statement)
     
-  def begin(self, node: ast.AST, arg: int):
+  def begin(self, node: ast.stmt, arg: int):
     name = str(arg)
     self.state.codes.push(
       model.Statement(
         **self.parse_base(node=node, name=name)
       )
     )
-    self.state.path.push(f"statements[{arg}]")
+    self.state.paths.push(None)
     
   def end(self):
-    self.state.path.pop()
+    self.state.paths.pop()
     self.state.codes.pop()
 
 
-class ExpressionParser(AstParser[ast.expr, Any]):
+class ExpressionParser(AstParser[ast.expr, Any, model.Expression]):
   def __init__(self, state: ParsingState):
     super().__init__(state=state, node_type=model.AstNodeType.Expression)
     
-  def begin(self, node: ast.AST, arg: Any):
+  def begin(self, node: ast.expr, arg: Any):
     self.state.codes.push(
       model.Expression(
         **self.parse_base(node=node, name="expr")
       )
     )
-    self.state.path.push(f"expr")
+    self.state.paths.push(None)
     
   def end(self):
-    self.state.path.pop()
+    self.state.paths.pop()
     self.state.codes.pop()
 
 
-class UnknownParser(AstParser[ast.AST, Any]):
+class UnknownParser(AstParser[ast.AST, Any, model.AstNode]):
   def __init__(self, state: ParsingState):
     super().__init__(state=state, node_type=model.AstNodeType.Unknown)
     
@@ -207,23 +242,32 @@ class UnknownParser(AstParser[ast.AST, Any]):
 
 
 class Parsers:
+  state: ParsingState
+  
+  modules: ModuleParser
   clazz: ClassParser
   functions: FunctionParser
   statements: StatementParser
   expressions: ExpressionParser
   unknown: UnknownParser
   
-  def __init__(self, clazz: ClassParser, functions: FunctionParser, statements: StatementParser, expressions: ExpressionParser, unknown: UnknownParser):
+  def __init__(self, modules: ModuleParser, state: ParsingState, clazz: ClassParser, functions: FunctionParser, statements: StatementParser, expressions: ExpressionParser, unknown: UnknownParser):
+    self.state = state
+    self.modules = modules
     self.clazz = clazz
     self.functions = functions
     self.statements = statements
     self.expressions = expressions
     self.unknown = unknown
-    
+  
+  def current(self) -> model.AstNode:
+    return self.state.codes.peek()
   
   @classmethod
   def create(cls, state: ParsingState) -> "Parsers":
     return Parsers(
+      state = state,
+      modules=ModuleParser(state=state),
       clazz = ClassParser(state=state),
       functions = FunctionParser(state=state),
       statements = StatementParser(state=state),
@@ -235,98 +279,128 @@ class Parsing:
   # visit_Constant...
   
   @classmethod
-  def collect_import_references(cls, parsers: Parsers, node: ast.Import) -> List[model.CodeReference]:
-    import pdb; pdb.set_trace()
-    return [
-      model.CodeReference(local_name=[name], reference_type=model.AstNodeType.Unknown)
-      for name in node.names
-    ]
+  def collect_import_references(cls, parsers: Parsers, node: ast.Import) -> None:
+    for alias in node.names:
+      local_name = alias.name if alias.asname is None else alias.asname
+      fully_qualifed_name = alias.name
+      parsers.state.scopes.peek().aliases[local_name] = fully_qualifed_name
+      reference = model.CodeReference(
+        local_name=local_name,
+        fully_qualified_name=fully_qualifed_name,
+      )
+      parsers.current().references.append(reference)
     
   @classmethod
-  def collect_import_from_references(cls, parsers: Parsers, node: ast.ImportFrom) -> List[model.CodeReference]:
-    import pdb; pdb.set_trace()
-    return [
-      model.CodeReference(local_name=local_name, reference_type=model.AstNodeType.Unknown)
-      for name in node.names
-      for local_name in [
-        [name] if node.module is None else [node.module, name]
-      ]
-    ]
+  def collect_import_from_references(cls, parsers: Parsers, node: ast.ImportFrom) -> None:
+    # I don't understand this...
+    assert node.level == 0
+    base = [] if node.module is None else [node.module]
+    for alias in node.names:
+      local_name = alias.name if alias.asname is None else alias.asname
+      fully_qualified_name = ".".join(base + [alias.name])
+      parsers.state.scopes.peek().aliases[local_name] = fully_qualified_name
+      reference = model.CodeReference(
+        local_name=local_name,
+        fully_qualified_name=fully_qualified_name,
+      )
+      parsers.current().references.append(reference)
   
   @classmethod
-  def collect_name_references(cls, parsers: Parsers, node: ast.Name) -> List[model.CodeReference]:
-    import pdb; pdb.set_trace()
-    return [
-      model.CodeReference(local_name=[node.id], reference_type=model.AstNodeType.Unknown)
-    ]
+  def collect_name_references(cls, parsers: Parsers, node: ast.Name) -> None:
+    # import pdb; pdb.set_trace()
+      # model.CodeReference(local_name=[node.id], reference_type=model.AstNodeType.Unknown)
+    # ]
+    pass
   
   @classmethod
-  def collect_references(cls, parsers: Parsers, node: ast.AST) -> List[model.CodeReference]:
+  def collect_references(cls, parsers: Parsers, node: ast.AST) -> None:
     if isinstance(node, ast.Name):
-      return cls.collect_name_references(parsers=parsers, node=node)
+      cls.collect_name_references(parsers=parsers, node=node)
+      return
     
     if isinstance(node, ast.Import):
-      return cls.collect_import_references(parsers=parsers, node=node)
+      cls.collect_import_references(parsers=parsers, node=node)
+      return
     
     if isinstance(node, ast.ImportFrom):
-      return cls.collect_import_from_references(parsers=parsers, node=node)
-    return []
+      cls.collect_import_from_references(parsers=parsers, node=node)
+      return
   
   @classmethod
-  def parse_children(cls, parsers: Parsers, node: ast.AST) -> List[model.AstNode]:
-    children = []
+  def parse_children(cls, parsers: Parsers, node: ast.AST) -> None:
+    current = parsers.current()
+    if current.ast_type in ["Import", "ImportFrom"]:
+      return
     for field, value in ast.iter_fields(node):
       if isinstance(value, ast.AST):
-        children.append(cls.parse_node(parsers=parsers, node=value))
+        child = cls.parse_node(parsers=parsers, node=value)
+        current.children.update({str(field): [child]})
         continue
       if not isinstance(value, list):
         continue
-      for index, item in enumerate(typing.cast(List[Any], value)):
+      children = []
+      for item in typing.cast(List[Any], value):
         if not isinstance(item, ast.AST):
           continue
-        # with parsers.path_element(path_element=str(index)):
-        children.append(cls.parse_node(parsers=parsers, node=item))
-    return children
+        child = cls.parse_node(parsers=parsers, node=item)
+        children.append(child)
+      current.children.update({str(field): children})
   
   @classmethod
-  def parse_inner(cls, parsers: Parsers, node: ast.AST) -> None:
+  def parse_inner(cls, parsers: Parsers, node: ast.AST) -> model.AstNode:
     cls.parse_children(parsers=parsers, node=node)
     cls.collect_references(parsers=parsers, node=node)
+    return parsers.current()
   
   @classmethod
   def parse_generic(cls, parsers: Parsers, node: ast.AST) -> model.AstNode:
     with parsers.unknown.with_(node=node, arg=None):
-      cls.parse_inner(parsers=parsers, node=node)
+      ret = cls.parse_inner(parsers=parsers, node=node)
+    return ret
+    
+  @classmethod
+  def parse_module(cls, parsers: Parsers, node: ast.Module) -> model.Module:
+    base_path = arg=parsers.state.paths.peek()
+    assert base_path
+    with parsers.modules.with_(node=node, arg=base_path):
+      ret = cls.parse_inner(parsers=parsers, node=node)
+    return typing.cast(model.Module, ret)
     
   @classmethod
   def parse_class_def(cls, parsers: Parsers, node: ast.ClassDef) -> model.Class:
-    with parsers.clazz.with_(node=node, name=node.name):
-      cls.parse_inner(parsers=parsers, node=node)
+    with parsers.clazz.with_(node=node, arg=node.name):
+      ret = cls.parse_inner(parsers=parsers, node=node)
+    return typing.cast(model.Class, ret)
   
   @classmethod
   def parse_function_def(cls, parsers: Parsers, node: ast.FunctionDef) -> model.Function:
-    with parsers.functions.with_(node=node, arg=[node.name, model.FunctionType.Simple]):
-      cls.parse_inner(parsers=parsers, node=node)
+    with parsers.functions.with_(node=node, arg=(node.name, model.FunctionType.Simple)):
+      ret = cls.parse_inner(parsers=parsers, node=node)
+    return typing.cast(model.Function, ret)
     
   @classmethod
   def parse_async_function_def(cls, parsers: Parsers, node: ast.AsyncFunctionDef) -> model.Function:
-    with parsers.functions.with_(node=node, arg=[node.name, model.FunctionType.Async]):
-      cls.parse_inner(parsers=parsers, node=node)
+    with parsers.functions.with_(node=node, arg=(node.name, model.FunctionType.Async)):
+      ret = cls.parse_inner(parsers=parsers, node=node)
+    return typing.cast(model.Function, ret)
   
   @classmethod
   def parse_lambda_def(cls, parsers: Parsers, node: ast.Lambda) -> model.Function:
-    with parsers.functions.with_(node=node, arg=["lambda", model.FunctionType.Lambda]):
-      cls.parse_inner(parsers=parsers, node=node)
+    with parsers.functions.with_(node=node, arg=("lambda", model.FunctionType.Lambda)):
+      ret = cls.parse_inner(parsers=parsers, node=node)
+    return typing.cast(model.Function, ret)
   
   @classmethod
   def parse_statement(cls, parsers: Parsers, node: ast.stmt) -> model.Statement:
-    with parsers.functions.with_(node=node, index=0):
-      cls.parse_inner(parsers=parsers, node=node)
+    with parsers.statements.with_(node=node, arg=0):
+      ret = cls.parse_inner(parsers=parsers, node=node)
+    return typing.cast(model.Statement, ret)
   
   @classmethod
   def parse_expression(cls, parsers: Parsers, node: ast.expr) -> model.Expression:
-    with parsers.functions.with_(node=node, arg=None):
-      cls.parse_inner(parsers=parsers, node=node)
+    with parsers.expressions.with_(node=node, arg=None):
+      ret = cls.parse_inner(parsers=parsers, node=node)
+    return typing.cast(model.Expression, ret)
   
   # @classmethod
   # def parse_variable(cls, parsers: Parsers, node: ast.Name) -> model.Variable:
@@ -338,28 +412,6 @@ class Parsing:
     
   @classmethod
   def parse_node(cls, parsers: Parsers, node: ast.AST) -> model.AstNode:
-    """TODO: Don't parse everything, just parse up to the current obj model..."""
-    # todo: add ignore directories
-    """
-    TODO: an expr can also be a statement
-    TODO: understand these:
-      possible sources of references?
-        assign
-        augassign
-        annassign
-        import
-        import from
-        global
-        nonlocal
-        Call
-        attribute
-        Name
-      important missing information?
-        boolop
-        binop
-        unaryop
-        Constant
-    """
     if isinstance(node, ast.ClassDef):
       return cls.parse_class_def(parsers=parsers, node=node)
     if isinstance(node, ast.AsyncFunctionDef):
@@ -370,7 +422,7 @@ class Parsing:
       return cls.parse_lambda_def(parsers=parsers, node=node)
     if isinstance(node, ast.stmt):
       return cls.parse_statement(parsers=parsers, node=node)
-    if isinstance(node, ast.Expr):
+    if isinstance(node, ast.expr):
       return cls.parse_expression(parsers=parsers, node=node)
     # if isinstance(node, ast.Name):
     #   return cls.parse_variable(parsers=parsers, node=node)
@@ -380,25 +432,6 @@ class Parsing:
   def fs_path_to_py_path(cls, fs_path: str) -> str:
     return fs_path[:-len(".py")].replace("/", ".")
     
-  @classmethod
-  def parse_module(cls, node: ast.Module, relative_path: str) -> model.Module:
-    base_path = cls.fs_path_to_py_path(relative_path)
-    state = ParsingState.create(base_path=base_path)
-    parsers = Parsers.create(state=state)
-    
-    module = model.Module(
-      relative_path=relative_path,
-      node_type=model.AstNodeType.Module,
-      scope=state.scopes.peek(),
-      node_type=model.AstNodeType.Module,
-      fully_qualified_name=base_path,
-      children=[],
-      references=[],
-      ast_type="module",
-    )
-    cls.parse_inner(parsers=parsers, node=node),
-    return module
-
   @classmethod
   def parse_source_directory(
     cls,
@@ -418,15 +451,23 @@ class Parsing:
         with open(file_path, "r") as f:
           source = f.read()
           ast_node = ast.parse(source)
-          rel_path = os.path.relpath(file_path, start=root_path)
+          relative_path = os.path.relpath(file_path, start=root_path)
+          
+          base_path = cls.fs_path_to_py_path(relative_path)
+          state = ParsingState.create(base_path=base_path)
+          parsers = Parsers.create(state=state)
           module = cls.parse_module(
+            parsers=parsers,
             node=ast_node,
-            relative_path=rel_path,
           )
-          modules[rel_path] = module
+          modules[base_path] = module
         if write_jsons:
-          with open(file_path + ".json", "w") as fp:
-            js =json.loads(module.json())
+          # TODO: This probably won't work with multiple source directories
+          file_path = os.path.join("output.dir", relative_path + ".json")
+          dir_name = os.path.dirname(file_path)
+          os.makedirs(dir_name, exist_ok=True)
+          with open(file_path, "w") as fp:
+            js = json.loads(module.json())
             json.dump(js, fp, indent=2)
     return project.SourceDirectory(
       root_path=root_path,
@@ -451,6 +492,8 @@ class Parsing:
         cls.parse_source_directory(
           directory_type=project.SourceDirectoryType.Library,
           root_path=source_directory,
+          ignores=spec.ignores,
+          write_jsons=write_jsons,
         )
       )
     return project.Project(

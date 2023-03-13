@@ -1,3 +1,5 @@
 
 venv
 src.json
+**/__pycache__
+output.dir/iawmr

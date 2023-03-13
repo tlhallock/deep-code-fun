@@ -1,4 +1,4 @@
 click
 pydantic?
-node2vec?
+node2vec
 mypy

@@ -1,5 +1,6 @@
 
 from typing import Optional
+import iawmr.domain.network as network
 import iawmr.domain.parsing as parsing
 from iawmr.domain.project import ProjectSpec
 import click
@@ -17,5 +18,8 @@ def main(root_path: Optional[str] = "."):
   )
   write_jsons = True
   project = parsing.Parsing.parse_project(spec=spec, write_jsons=write_jsons)
-  print(json.dumps(project.dict(), indent=2))
+  project.resolve_references()
+  network.fit_node2vec(project)
+  
+  # print(json.dumps(project.dict(), indent=2))
 
