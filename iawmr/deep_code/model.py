@@ -61,10 +61,10 @@ class AstNode(BaseModel):
   references: List[CodeReference] = []
   uuid: str = pydantic.Field(default_factory=lambda: str(uuid4()))
   
-  def node_attributes(attributes) -> Dict[str, str]:
+  def node_attributes(self) -> Dict[str, str]:
     return dict(
-      node_type=AstNodeType,
-      ast_type=str,
+      node_type=self.node_type.name,
+      ast_type=self.ast_type,
     )
 
   def get_fully_qualified_name(self) -> Optional[str]:

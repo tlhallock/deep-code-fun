@@ -9,8 +9,8 @@ from contextlib import contextmanager
 from abc import ABC, abstractmethod
 import json
 
-import iawmr.domain.model as model
-import iawmr.domain.project as project
+import iawmr.deep_code.model as model
+import iawmr.deep_code.project as project
 
 
 T = TypeVar("T")

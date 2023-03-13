@@ -1,8 +1,8 @@
 
 from typing import Optional
-import iawmr.domain.network as network
-import iawmr.domain.parsing as parsing
-from iawmr.domain.project import ProjectSpec
+import iawmr.deep_code.network as network
+import iawmr.deep_code.parsing as parsing
+from iawmr.deep_code.project import ProjectSpec
 import click
 import json
 

@@ -3,7 +3,7 @@ from node2vec import Node2Vec
 import networkx as nx
 from uuid import uuid4
 
-from iawmr.domain.project import Project
+from iawmr.deep_code.project import Project
 
 def fit_node2vec(project: Project):
   graph = nx.Graph()
@@ -57,7 +57,7 @@ def fit_node2vec(project: Project):
   
 
   # Embed the nodes using node2vec
-  node2vec = Node2Vec(graph, dimensions=64, walk_length=30, num_walks=200)
+  node2vec = Node2Vec(graph, dimensions=3, walk_length=30, num_walks=200)
   model = node2vec.fit(window=10, min_count=1)
 
   # Get the embeddings for each node

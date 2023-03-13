@@ -1,7 +1,7 @@
 from enum import Enum, auto
 from typing import Dict, List, Optional
 import pydantic
-import iawmr.domain.model as model
+import iawmr.deep_code.model as model
 
 
 class SourceDirectoryType(Enum):
