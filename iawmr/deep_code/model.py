@@ -63,7 +63,7 @@ class AstNode(BaseModel):
   
   def node_attributes(self) -> Dict[str, str]:
     return dict(
-      node_type=self.node_type.name,
+      node_type=str(self.node_type),
       ast_type=self.ast_type,
     )
 

@@ -3,6 +3,10 @@ from iawmr.main import main
 
 """
 TODO:
+    remove the uuid field from the ast nodes
+      This should be a string that uniquely identifies the node
+    sequence2vec to embed the names
+      
     Make expressions optional
     Implement constants
     Add variable names

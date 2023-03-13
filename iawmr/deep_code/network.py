@@ -2,12 +2,18 @@
 from node2vec import Node2Vec
 import networkx as nx
 from uuid import uuid4
+import matplotlib
+import matplotlib.pyplot as plt
+from networkx.readwrite import json_graph
+import json
+
 
 from iawmr.deep_code.project import Project
 
 def fit_node2vec(project: Project):
   graph = nx.Graph()
   
+  # Could use fully qualified name, when it is available
   node_uuids = []
   unresolved_references = {}
   
@@ -55,16 +61,35 @@ def fit_node2vec(project: Project):
           graph.add_edge(prev_group_node, group_node, edge_type="group_follows")
         prev_group_node = group_node
   
+  if True:
+    data = json_graph.node_link_data(graph)
+    # Save the data to a JSON file
+    with open("output.dir/graph.json", "w") as f:
+      json.dump(data, f, indent=2)
+    print("wrote graph")
+    print_stats()
+  
+  if False:
+    # This takes too long.
+    pos = nx.spring_layout(graph)
+    nx.draw(graph, pos, with_labels=True)
+    plt.savefig("output.dir/graph.png")
+    print("wrote image")
+  
 
-  # Embed the nodes using node2vec
-  node2vec = Node2Vec(graph, dimensions=3, walk_length=30, num_walks=200)
-  model = node2vec.fit(window=10, min_count=1)
+  # Small so we can run quickly until it works
+  node2vec = Node2Vec(graph, dimensions=3, walk_length=5, num_walks=5)
+  model = node2vec.fit(window=5, min_count=1)
 
-  # Get the embeddings for each node
-  # TODO: field_name_nodes
-  # embeddings = {}
-  # for node in nodes:
-  #   embedding = model.wv[node.fully_qualified_name]
-  #   embeddings[node.uuid] = list(embedding)
-
-  # return embeddings
+  embeddings = {}
+  for node in node_uuids:
+    embedding = model.wv[node]
+    embeddings[node] = list(embedding)
+  return embeddings
+  
+def print_stats():
+  with open("output.dir/graph.json", "r") as f:
+    data = json.load(f)
+  print("number of nodes", len(data["nodes"]))
+  print("number of edges", len(data["links"]))
+  print("number of unresolved references", len([link for link in data["links"] if link["edge_type"] == "unresolved"]))
