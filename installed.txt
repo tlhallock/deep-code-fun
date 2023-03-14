@@ -1,4 +1,5 @@
 click
-pydantic?
+pydantic
 node2vec
 mypy
+matplotlib

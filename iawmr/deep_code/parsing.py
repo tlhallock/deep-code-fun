@@ -67,15 +67,24 @@ class PathStack(ParsingStack[Optional[str], Optional[str]]):
 class ParsingState:
   codes: CodeStack
   scopes: ScopeStack
-  paths: PathStack
+  detailed_paths: PathStack
+  referencable_paths: PathStack
   
-  def __init__(self, codes: CodeStack, scopes: ScopeStack, paths: PathStack):
+  def __init__(self, codes: CodeStack, scopes: ScopeStack, detailed_paths: PathStack, referencable_paths: PathStack):
     self.codes = codes
     self.scopes = scopes
-    self.paths = paths
+    self.detailed_paths = detailed_paths
+    self.referencable_paths = referencable_paths
   
-  def fully_qualify(self, local_name: List[Optional[str]]) -> str:
-    return ".".join(s if s is not None else "none" for s in self.paths.elements + local_name)
+  # TODO: (maybe) this thing should never have a None in it
+  def create_id(self) -> str:
+    assert all(s is not None for s in self.detailed_paths.elements)
+    return ".".join(s for s in self.detailed_paths.elements if s is not None)
+  
+  def fully_qualify(self) -> Optional[str]:
+    if any(s is not None for s in self.referencable_paths.elements):
+      return None
+    return ".".join(s for s in self.referencable_paths.elements if s is not None)
   
   @classmethod
   def create(cls, base_path) -> "ParsingState":
@@ -83,7 +92,8 @@ class ParsingState:
       # root_path=root_path,
       codes=CodeStack(),
       scopes=ScopeStack(elements=[model.Scope(name="module scope", parent=None, aliases={})]),
-      paths=PathStack(elements=[base_path]),
+      detailed_paths=PathStack(elements=[base_path]),
+      referencable_paths=PathStack(elements=[base_path]),
     )
 
 
@@ -103,142 +113,164 @@ class AstParser(ABC, Generic[O, G, N]):
     pass
   
   @abstractmethod
-  def end(self) -> None:
+  def end(self):
     pass
   
   @contextmanager
-  def with_(self, node: O, arg: G):
-    self.begin(node=node, arg=arg)
+  def with_(self, node: O, id_part: G):
+    """In hindsight, the arg argument should probably be called name or id_part"""
+    """lolz, so then I made the change, and then I realized it doesn't apply to functions"""
+    self.begin(node=node, id_part=id_part)
     try:
       yield
     finally:
       self.end()
   
-  def parse_base(self, node: O, name: Optional[str]) -> Dict[str, Any]:
+  def parse_base(self, node: O) -> Dict[str, Any]:
     return dict(
         ast_type=node.__class__.__name__,
-        children=[],
+        children={},
         references=[],
         node_type=self.node_type,
+        project_unique_path=self.state.create_id(),
     )
-  
+
 
 class ModuleParser(AstParser[ast.Module, str, model.Module]):
   def __init__(self, state: ParsingState):
     super().__init__(state=state, node_type=model.AstNodeType.Module)
   
-  def begin(self, node: ast.Module, arg: str):
-    scope = self.state.scopes.push("module scope")
+  def begin(self, node: ast.Module, id_part: str):
+    self.state.detailed_paths.push(id_part)
+    self.state.referencable_paths.push(id_part)
+    scope = self.state.scopes.push(f"module {id_part}")
     self.state.codes.push(
       model.Module(
-        **self.parse_base(node=node, name="module"),
+        **self.parse_base(node=node),
         scope=scope,
-        relative_path=arg,
-        fully_qualified_name=arg,
+        relative_path=id_part,
+        fully_qualified_name=id_part,
       ),
     )
-    self.state.paths.push(arg)
-    
+  
   def end(self):
     self.state.scopes.pop()
     self.state.codes.pop()
-    self.state.paths.pop()
+    self.state.referencable_paths.pop()
+    self.state.detailed_paths.pop()
 
 
 class ClassParser(AstParser[ast.ClassDef, str, model.Class]):
   def __init__(self, state: ParsingState):
     super().__init__(state=state, node_type=model.AstNodeType.Class)
     
-  def begin(self, node: ast.ClassDef, arg: str):
-    scope = self.state.scopes.push(f"class {node.name}")
+  def begin(self, node: ast.ClassDef, id_part: str):
+    self.state.detailed_paths.push(id_part)
+    self.state.referencable_paths.push(id_part)
+    scope = self.state.scopes.push(f"class {id_part}")
     self.state.codes.push(
       model.Class(
-        **self.parse_base(node=node, name=node.name),
-        name=arg,
+        **self.parse_base(node=node),
+        name=id_part,
         scope=scope,
-        fully_qualified_name=self.state.fully_qualify([node.name]),
+        fully_qualified_name=self.state.fully_qualify(),
       ),
     )
-    self.state.paths.push(node.name)
-    
+  
   def end(self):
-    self.state.paths.pop()
     self.state.scopes.pop()
     self.state.codes.pop()
+    self.state.referencable_paths.pop()
+    self.state.detailed_paths.pop()
 
 
-class FunctionParser(AstParser[ast.AST, Tuple[str, model.FunctionType], model.Function]):
+class FunctionParser(AstParser[ast.AST, Tuple[Optional[str], model.FunctionType], model.Function]):
   def __init__(self, state: ParsingState):
     super().__init__(state=state, node_type=model.AstNodeType.Function)
     
-  def begin(self, node: ast.AST, arg: Tuple[str, model.FunctionType]):
-    name, function_type = arg[0], arg[1]
+  def begin(self, node: ast.AST, id_part: Tuple[Optional[str], model.FunctionType]):
+    name, function_type = id_part[0], id_part[1]
+    self.state.detailed_paths.push(name)
+    self.state.referencable_paths.push(name)
     scope = self.state.scopes.push(f"function {name}")
     self.state.codes.push(
       model.Function(
-        **self.parse_base(node=node, name=name),
-        name=name,
+        **self.parse_base(node=node),
+        name=name if name is not None else "<anonymous>",
         function_type=function_type,
         scope=scope,
-        fully_qualified_name=self.state.fully_qualify([name]),
+        fully_qualified_name=self.state.fully_qualify(),
       )
     )
-    self.state.paths.push(name)
-    
+  
   def end(self):
-    self.state.paths.pop()
     self.state.scopes.pop()
     self.state.codes.pop()
+    self.state.referencable_paths.pop()
+    self.state.detailed_paths.pop()
 
 
-class StatementParser(AstParser[ast.stmt, int, model.Statement]):
+class StatementParser(AstParser[ast.stmt, str, model.Statement]):
   def __init__(self, state: ParsingState):
     super().__init__(state=state, node_type=model.AstNodeType.Statement)
     
-  def begin(self, node: ast.stmt, arg: int):
-    name = str(arg)
+  def begin(self, node: ast.stmt, id_part: int):
+    self.state.detailed_paths.push(id_part)
+    self.state.referencable_paths.push(None)
     self.state.codes.push(
       model.Statement(
-        **self.parse_base(node=node, name=name)
+        **self.parse_base(node=node)
       )
     )
-    self.state.paths.push(None)
-    
+  
   def end(self):
-    self.state.paths.pop()
     self.state.codes.pop()
+    self.state.referencable_paths.pop()
+    self.state.detailed_paths.pop()
 
 
-class ExpressionParser(AstParser[ast.expr, Any, model.Expression]):
+class ExpressionParser(AstParser[ast.expr, str, model.Expression]):
   def __init__(self, state: ParsingState):
     super().__init__(state=state, node_type=model.AstNodeType.Expression)
     
-  def begin(self, node: ast.expr, arg: Any):
+  def begin(self, node: ast.expr, id_part: str):
+    self.state.detailed_paths.push(id_part)
+    self.state.referencable_paths.push(None)
     self.state.codes.push(
       model.Expression(
-        **self.parse_base(node=node, name="expr")
+        **self.parse_base(node=node)
       )
     )
-    self.state.paths.push(None)
-    
+  
   def end(self):
-    self.state.paths.pop()
     self.state.codes.pop()
+    self.state.referencable_paths.pop()
+    self.state.detailed_paths.pop()
 
 
-class UnknownParser(AstParser[ast.AST, Any, model.AstNode]):
+class UnknownParser(AstParser[ast.AST, str, model.AstNode]):
   def __init__(self, state: ParsingState):
     super().__init__(state=state, node_type=model.AstNodeType.Unknown)
     
-  def begin(self, node: ast.AST, arg: Any):
+  def begin(self, node: ast.AST, id_part: str):
+    self.state.detailed_paths.push(id_part)
+    self.state.referencable_paths.push(None)
     self.state.codes.push(
       model.AstNode(
-        **self.parse_base(node=node, name="unknown")
+        **self.parse_base(node=node)
       )
     )
-    
+  
   def end(self):
     self.state.codes.pop()
+    self.state.referencable_paths.pop()
+    self.state.detailed_paths.pop()
+
+
+class ParsingStrategy:
+  def should_parse(self, node: ast.AST) -> bool:
+    # TODO:
+    return True
 
 
 class Parsers:
@@ -287,6 +319,7 @@ class Parsing:
       reference = model.CodeReference(
         local_name=local_name,
         fully_qualified_name=fully_qualifed_name,
+        reference_type="import",
       )
       parsers.current().references.append(reference)
     
@@ -302,6 +335,7 @@ class Parsing:
       reference = model.CodeReference(
         local_name=local_name,
         fully_qualified_name=fully_qualified_name,
+        reference_type="import_from",
       )
       parsers.current().references.append(reference)
   
@@ -325,26 +359,42 @@ class Parsing:
     if isinstance(node, ast.ImportFrom):
       cls.collect_import_from_references(parsers=parsers, node=node)
       return
+    
+      # return cls.parse_variable(parsers=parsers, node=node)
+      # pass
+    if isinstance(node, ast.Call):
+      pass
+    if isinstance(node, ast.Attribute):
+      pass
+    if isinstance(node, ast.Store):
+      pass
+    if isinstance(node, ast.Load):
+      pass
+      # return cls.parse_variable(parsers=parsers, node=node)
   
   @classmethod
   def parse_children(cls, parsers: Parsers, node: ast.AST) -> None:
     current = parsers.current()
-    if current.ast_type in ["Import", "ImportFrom"]:
-      return
+    # TODO: do this with the strategy
+    # if current.ast_type in ["Import", "ImportFrom"]:
+    #   return
     for field, value in ast.iter_fields(node):
+      key = str(field)
+      if key in current.children:
+        raise Exception("I think the same field is defined twice.")
       if isinstance(value, ast.AST):
-        child = cls.parse_node(parsers=parsers, node=value)
-        current.children.update({str(field): [child]})
+        child = cls.parse_node(parsers=parsers, node=value, default_name=str(field))
+        current.children.update({key: [child]})
         continue
       if not isinstance(value, list):
         continue
       children = []
-      for item in typing.cast(List[Any], value):
+      for index, item in enumerate(typing.cast(List[Any], value)):
         if not isinstance(item, ast.AST):
           continue
-        child = cls.parse_node(parsers=parsers, node=item)
+        child = cls.parse_node(parsers=parsers, node=item, default_name=f"{str(field)}[{index}]")
         children.append(child)
-      current.children.update({str(field): children})
+      current.children.update({key: children})
   
   @classmethod
   def parse_inner(cls, parsers: Parsers, node: ast.AST) -> model.AstNode:
@@ -353,52 +403,52 @@ class Parsing:
     return parsers.current()
   
   @classmethod
-  def parse_generic(cls, parsers: Parsers, node: ast.AST) -> model.AstNode:
-    with parsers.unknown.with_(node=node, arg=None):
+  def parse_generic(cls, parsers: Parsers, node: ast.AST, default_name: str) -> model.AstNode:
+    with parsers.unknown.with_(node=node, id_part=default_name):
       ret = cls.parse_inner(parsers=parsers, node=node)
     return ret
     
   @classmethod
   def parse_module(cls, parsers: Parsers, node: ast.Module) -> model.Module:
-    base_path = arg=parsers.state.paths.peek()
+    base_path = parsers.state.referencable_paths.peek()
     assert base_path
-    with parsers.modules.with_(node=node, arg=base_path):
+    with parsers.modules.with_(node=node, id_part=base_path):
       ret = cls.parse_inner(parsers=parsers, node=node)
     return typing.cast(model.Module, ret)
     
   @classmethod
   def parse_class_def(cls, parsers: Parsers, node: ast.ClassDef) -> model.Class:
-    with parsers.clazz.with_(node=node, arg=node.name):
+    with parsers.clazz.with_(node=node, id_part=node.name):
       ret = cls.parse_inner(parsers=parsers, node=node)
     return typing.cast(model.Class, ret)
   
   @classmethod
   def parse_function_def(cls, parsers: Parsers, node: ast.FunctionDef) -> model.Function:
-    with parsers.functions.with_(node=node, arg=(node.name, model.FunctionType.Simple)):
+    with parsers.functions.with_(node=node, id_part=(node.name, model.FunctionType.Simple)):
       ret = cls.parse_inner(parsers=parsers, node=node)
     return typing.cast(model.Function, ret)
     
   @classmethod
   def parse_async_function_def(cls, parsers: Parsers, node: ast.AsyncFunctionDef) -> model.Function:
-    with parsers.functions.with_(node=node, arg=(node.name, model.FunctionType.Async)):
+    with parsers.functions.with_(node=node, id_part=(node.name, model.FunctionType.Async)):
       ret = cls.parse_inner(parsers=parsers, node=node)
     return typing.cast(model.Function, ret)
   
   @classmethod
   def parse_lambda_def(cls, parsers: Parsers, node: ast.Lambda) -> model.Function:
-    with parsers.functions.with_(node=node, arg=("lambda", model.FunctionType.Lambda)):
+    with parsers.functions.with_(node=node, id_part=(None, model.FunctionType.Lambda)):
       ret = cls.parse_inner(parsers=parsers, node=node)
     return typing.cast(model.Function, ret)
   
   @classmethod
-  def parse_statement(cls, parsers: Parsers, node: ast.stmt) -> model.Statement:
-    with parsers.statements.with_(node=node, arg=0):
+  def parse_statement(cls, parsers: Parsers, node: ast.stmt, default_name: str) -> model.Statement:
+    with parsers.statements.with_(node=node, id_part=default_name):
       ret = cls.parse_inner(parsers=parsers, node=node)
     return typing.cast(model.Statement, ret)
   
   @classmethod
-  def parse_expression(cls, parsers: Parsers, node: ast.expr) -> model.Expression:
-    with parsers.expressions.with_(node=node, arg=None):
+  def parse_expression(cls, parsers: Parsers, node: ast.expr, default_name: str) -> model.Expression:
+    with parsers.expressions.with_(node=node, id_part=default_name):
       ret = cls.parse_inner(parsers=parsers, node=node)
     return typing.cast(model.Expression, ret)
   
@@ -411,7 +461,7 @@ class Parsing:
   #   )
     
   @classmethod
-  def parse_node(cls, parsers: Parsers, node: ast.AST) -> model.AstNode:
+  def parse_node(cls, parsers: Parsers, node: ast.AST, default_name: str) -> model.AstNode:
     if isinstance(node, ast.ClassDef):
       return cls.parse_class_def(parsers=parsers, node=node)
     if isinstance(node, ast.AsyncFunctionDef):
@@ -421,12 +471,15 @@ class Parsing:
     if isinstance(node, ast.Lambda):
       return cls.parse_lambda_def(parsers=parsers, node=node)
     if isinstance(node, ast.stmt):
-      return cls.parse_statement(parsers=parsers, node=node)
+      return cls.parse_statement(parsers=parsers, node=node, default_name=default_name)
     if isinstance(node, ast.expr):
-      return cls.parse_expression(parsers=parsers, node=node)
+      return cls.parse_expression(parsers=parsers, node=node, default_name=default_name)
+    # Darn, no way to know when a variable is declared in python.
+    # Makes this harder...
     # if isinstance(node, ast.Name):
-    #   return cls.parse_variable(parsers=parsers, node=node)
-    return cls.parse_generic(parsers=parsers, node=node)
+      # return cls.parse_variable(parsers=parsers, node=node)
+      # pass
+    return cls.parse_generic(parsers=parsers, node=node, default_name=default_name)
   
   @classmethod
   def fs_path_to_py_path(cls, fs_path: str) -> str:

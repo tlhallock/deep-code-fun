@@ -1,5 +1,5 @@
 from enum import Enum, auto
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional, Set, Generator
 import pydantic
 import iawmr.deep_code.model as model
 
@@ -25,31 +25,31 @@ class ProjectSpec(model.BaseModel):
 class Project(model.BaseModel):
   spec: ProjectSpec
   sources: List[SourceDirectory]
+  # Idk if this needs to be saved...
+  unresolved_references: Optional[Set[str]]
   
-  def modules(self):
+  def modules(self) -> Iterator[model.Module]:
     for source in self.sources:
       for module in source.modules.values():
         yield module
 
-
   def resolve_references(self):
-    """
-    Look at all the references in all the modules, and check if they are in this project.
-    If they are, then set the target of the reference to where it points.
-    Otherwise, append them to a list of unresolved references
-    """
     targets = {}
+    unresolved_references = set()
     for module in self.modules():
-      for name, node, scope in module.all_nodes():
-        if not name:
+      for node, _ in module.all_nodes():
+        target = node.get_fully_qualified_name()
+        if not target:
           continue
-        targets[name] = node
+        targets[target] = node
     for module in self.modules():
-      for resolvable in module.all_references(scope=None):
-        resolvable: model.ResolvableReference = resolvable
-        key = resolvable.reference.fully_qualified_name
-        if key in targets:
-          resolvable.reference.target = targets[key]
-        else:
-          print("Unresolved reference", key)
+      for node, _ in module.all_nodes():
+        for reference in node.references:
+          key = reference.fully_qualified_name
+          if key in targets:
+            reference.target = targets[key]
+          else:
+            unresolved_references.add(key)
+    print("Unresolved references", unresolved_references)
+    self.unresolved_references = unresolved_references
 

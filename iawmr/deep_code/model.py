@@ -1,6 +1,6 @@
 
 import ast
-from typing import Dict, List, Optional
+from typing import Dict, Generator, Iterator, List, Optional, Tuple
 import pydantic
 from enum import Enum, auto
 from uuid import uuid4
@@ -38,6 +38,7 @@ class CodeReference(BaseModel):
   local_name: str
   fully_qualified_name: str
   target: Optional["AstNode"] = None
+  reference_type: str
   
 
 class Scope(BaseModel):
@@ -46,20 +47,21 @@ class Scope(BaseModel):
   aliases: Dict[str, str] = {}
 
 
-class ResolvableReference(BaseModel):
-  node: "AstNode"
-  scope: Scope
-  reference: CodeReference
+# class ResolvableReference(BaseModel):
+#   node: "AstNode"
+#   scope: Scope
+#   reference: CodeReference
 
 
 # rename to base or generic?
 class AstNode(BaseModel):
   # parent: Optional["AstNode"]
   node_type: AstNodeType
+  # This SHOULD be unique, but if they define the same function twice, it won't be.
+  project_unique_path: str
   ast_type: str
   children: Dict[str, List["AstNode"]] = {}
   references: List[CodeReference] = []
-  uuid: str = pydantic.Field(default_factory=lambda: str(uuid4()))
   
   def node_attributes(self) -> Dict[str, str]:
     return dict(
@@ -73,25 +75,25 @@ class AstNode(BaseModel):
   def get_scope(self, scope: Optional[Scope]):
     return scope
   
-  def all_nodes(self, scope: Optional[Scope] = None):
+  def all_nodes(self, scope: Optional[Scope] = None) -> Iterator[Tuple["AstNode", Scope]]:
     scope = self.get_scope(scope)
     assert scope
-    yield (self.get_fully_qualified_name(), self, scope)
+    yield (self, scope)
     for group in self.children.values():
       for child in group:
         yield from child.all_nodes(scope=scope)
       
     
-  def all_references(self, scope: Optional[Scope]):
-    scope = self.get_scope(scope)
-    assert scope
-    for reference in self.references:
-      yield ResolvableReference(node=self, scope=scope, reference=reference)
-    for group in self.children.values():
-      for child in group:
-        yield from child.all_references(scope=scope)
+#   def all_references(self, scope: Optional[Scope]):
+#     scope = self.get_scope(scope)
+#     assert scope
+#     for reference in self.references:
+#       yield ResolvableReference(node=self, scope=scope, reference=reference)
+#     for group in self.children.values():
+#       for child in group:
+#         yield from child.all_references(scope=scope)
 
-ResolvableReference.update_forward_refs()
+# ResolvableReference.update_forward_refs()
 
 class ScopedNode(AstNode):
   scope: Scope
@@ -101,7 +103,7 @@ class ScopedNode(AstNode):
 
 class Module(ScopedNode):
   relative_path: str
-  fully_qualified_name: str
+  fully_qualified_name: Optional[str]
   scope: Scope
 
   def get_fully_qualified_name(self) -> Optional[str]:
@@ -110,7 +112,7 @@ class Module(ScopedNode):
 class Function(ScopedNode):
   name: str
   function_type: FunctionType
-  fully_qualified_name: str
+  fully_qualified_name: Optional[str]
   scope: Scope
 
   def get_fully_qualified_name(self) -> Optional[str]:
@@ -119,7 +121,7 @@ class Function(ScopedNode):
 class Class(ScopedNode):
   name: str
   scope: Scope
-  fully_qualified_name: str
+  fully_qualified_name: Optional[str]
 
   def get_fully_qualified_name(self) -> Optional[str]:
     return self.fully_qualified_name

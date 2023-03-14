@@ -2,4 +2,7 @@
 venv
 src.json
 **/__pycache__
-output.dir/iawmr
+output.dir
+chat_gpt_questions.txt
+documentation.txt
+.vscode/launch.json
