@@ -12,68 +12,123 @@ import json
 
 from iawmr.deep_code.project import Project
 
-def fit_node2vec(project: Project):
-  graph = nx.Graph()
-  node_uuids: Set[str] = set()
-  
+
+def create_nodes(project: Project, graph: nx.Graph, node_uuids: Set[str]) -> None:
   for module in project.modules():
     for node, _ in module.all_nodes():
-      node: model.AstNode = node
       id = node.project_unique_path
       if id in node_uuids:
         raise Exception("Duplicate node")
       node_uuids.add(id)
       attrs = node.node_attributes()
       graph.add_node(id, **attrs)
-  
+
+
+def add_nodes_references(graph: nx.Graph, node_uuids: Set[str], node: model.AstNode, reference: model.CodeReference) -> None:
+  if reference.target:
+    graph.add_edge(
+      node.project_unique_path,
+      reference.target.project_unique_path,
+      edge_type=reference.reference_type,
+      resolution="resolved",
+    )
+    return
+
+  key = f"unresolved::{reference.fully_qualified_name}"
+  if key not in node_uuids:
+    # TODO: use the Project's unresolved_references, then we can assume it is here, right?
+    node_uuids.add(key)
+    graph.add_node(key)
+          
+  graph.add_edge(
+    node.project_unique_path,
+    key,
+    edge_type=reference.reference_type,
+    resolution="unresolved",
+  )
+
+
+def add_references(project: Project, graph: nx.Graph, node_uuids: Set[str]) -> None:
   for module in project.modules():
     for node, _ in module.all_nodes():
-      node: model.AstNode = node
       for reference in node.references:
-        if reference.target:
-          graph.add_edge(
-            node.project_unique_path,
-            reference.target.project_unique_path,
-            edge_type=reference.reference_type,
-            resolution="resolved",
-          )
-          continue
+        add_nodes_references(graph=graph, node_uuids=node_uuids, node=node, reference=reference)
+
+
+def add_child_list(graph: nx.Graph, parent: str, values: List[model.AstNode]) -> None:
+  # Add beginning sentinal?
+  prev_child = None
+  for child in values:
+    graph.add_edge(parent, child.project_unique_path, edge_type="is_child")
+    if prev_child is not None:
+      graph.add_edge(prev_child.project_unique_path, child.project_unique_path, edge_type="child_follows")
+    prev_child = child
+
+
+def add_value_fields(graph: nx.Graph, node_uuids: Set[str], node: model.AstNode) -> None:
+  prev_group_node = None
+  for index, mapping in enumerate(node.children.value_fields.items()):
+    field_name, values = mapping
+    
+    group_node = f"{node.project_unique_path}::{field_name}::{index}"
+    node_uuids.add(group_node)
+    graph.add_node(group_node, field_name=field_name)
+    graph.add_edge(node.project_unique_path, group_node, edge_type="field")
+    if prev_group_node is not None:
+      graph.add_edge(prev_group_node, group_node, edge_type="group_follows")
+    # Check if the node already exists
+  
+    add_child_list(graph=graph, parent=group_node, values=values)  
+  
+    prev_group_node = group_node
+  
+
+def add_list_fields(graph: nx.Graph, node_uuids: Set[str], node: model.AstNode) -> None:
+  prev_outer_group_node = None
+  for outer_index, outer_mapping in enumerate(node.children.list_fields.items()):
+    field_name, outer_values = outer_mapping
+    
+    outer_group_node = f"{node.project_unique_path}::{field_name}::{outer_index}"
+    node_uuids.add(outer_group_node)
+    graph.add_node(outer_group_node, field_name=field_name)
+    graph.add_edge(node.project_unique_path, outer_group_node, edge_type="outer-field")
+    if prev_outer_group_node is not None:
+      graph.add_edge(prev_outer_group_node, outer_group_node, edge_type="group_follows")
+    
+    prev_inner_group_node = None
+    for inner_index, inner_values in enumerate(outer_values):
+      group_node = f"{outer_group_node}::{inner_index}"
+      node_uuids.add(group_node)
+      graph.add_node(group_node, field_name=field_name)
+      graph.add_edge(outer_group_node, group_node, edge_type="inner-field")
+      if prev_inner_group_node is not None:
+        graph.add_edge(prev_inner_group_node, group_node, edge_type="group_follows")
         
-        key = "unresolved::{reference.fully_qualified_name}"
-        if key not in node_uuids:
-          # TODO: use the Project's unresolved_references, then we can assume it is here, right?
-          node_uuids.add(key)
-          graph.add_node(key)
-          
-        graph.add_edge(
-          node.project_unique_path,
-          key,
-          edge_type=reference.reference_type,
-          resolution="unresolved",
-        )
+      add_child_list(graph=graph, parent=group_node, values=inner_values)
+      prev_inner_group_node = group_node
+    prev_outer_group_node = outer_group_node
+  
+
+def add_nodes_children(graph: nx.Graph, node_uuids: Set[str], node: model.AstNode) -> None:
+  # TODO: Should I add sentinal nodes? (Or just a begin?)
+  add_value_fields(graph=graph, node_uuids=node_uuids, node=node)
+  add_list_fields(graph=graph, node_uuids=node_uuids, node=node)
+
+
+def add_children(project: Project, graph: nx.Graph, node_uuids: Set[str]) -> None:
+  for module in project.modules():
+    for node, _ in module.all_nodes():
+      add_nodes_children(graph=graph, node_uuids=node_uuids, node=node)
+
+def fit_node2vec(project: Project):
+  graph = nx.Graph()
+  node_uuids: Set[str] = set()
+  
+  create_nodes(project=project, graph=graph, node_uuids=node_uuids)
+  add_references(project=project, graph=graph, node_uuids=node_uuids)
+  add_children(project=project, graph=graph, node_uuids=node_uuids)
   
   # Now add children
-  for module in project.modules():
-    for node, _ in module.all_nodes():
-      # TODO: Should I add a begin sentinal?
-      prev_group_node = None
-      for field_name, group in node.children.items():
-        prev_child = None
-        group_node = f"{node.project_unique_path}::{field_name}"
-        node_uuids.add(group_node)
-        graph.add_node(group_node, field_name=field_name)
-        graph.add_edge(node.project_unique_path, group_node, edge_type="field")
-        # Check if the node already exists
-        
-        for child in group:
-          graph.add_edge(group_node, child.project_unique_path, edge_type="contains")
-          if prev_child is not None:
-            graph.add_edge(prev_child.project_unique_path, child.project_unique_path, edge_type="child_follows")
-          prev_child = child
-        
-        if prev_group_node is not None:
-          graph.add_edge(prev_group_node, group_node, edge_type="group_follows")
-        prev_group_node = group_node
   
   if True:
     data = json_graph.node_link_data(graph)

@@ -1,7 +1,8 @@
 
 from typing import Optional
 import iawmr.deep_code.network as network
-import iawmr.deep_code.parsing as parsing
+from iawmr.deep_code.parsing.parsing import Parsing
+from iawmr.deep_code.parsing.strategy import ParsingStrategy
 from iawmr.deep_code.project import ProjectSpec
 import click
 import json
@@ -14,12 +15,12 @@ def main(root_path: Optional[str] = "."):
     name="my self",
     ignores=["venv"],
     venv=None,
-    sources=["."]
+    sources=["."],
+    parsing_strategy=ParsingStrategy.create(),
   )
   write_jsons = True
-  project = parsing.Parsing.parse_project(spec=spec, write_jsons=write_jsons)
+  project = Parsing.parse_project(spec=spec, write_jsons=write_jsons)
   project.resolve_references()
   network.fit_node2vec(project)
-  
   # print(json.dumps(project.dict(), indent=2))
 
